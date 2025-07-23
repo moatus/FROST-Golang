@@ -1,0 +1,55 @@
+# FROST Library Test Configuration
+# This file defines which tests to skip in CI/automated testing
+# Focus on security-critical and core functionality tests
+
+# Feature-Specific Tests (Skip in CI)
+TestBitcoinChallenge
+TestEthereumChallenge
+TestSolanaChallenge
+TestBitcoinSignatureReference
+TestEthereumChainflipCompatibility
+TestSolanaCompatibilityWithChainflip
+TestBitcoinSignatureFormat
+TestEthereumSignatureFormat
+TestSolanaSignatureBytes
+TestSolanaSignatureRoundTrip
+
+# Edge Case Tests (Skip in CI)
+TestFROSTErrors
+TestEdgeCases
+TestPointValidation
+TestParticipantValidation
+TestBLSKeyValidation
+TestConfigurationValidation
+
+# Performance & Benchmarking Tests (Skip in CI)
+TestPerformanceWithImprovements
+TestFinalizerZeroization
+TestHashAlgorithmPerformance
+
+# Integration Tests (Skip in CI - run separately)
+TestSolanaTransactionBuilding
+TestSolanaTokenTransactions
+TestSolanaCustomPrograms
+TestSolanaAddressOperations
+TestSolanaTransactionSerialization
+
+# Compatibility Tests (Skip in CI)
+TestBlake2bCompatibility
+TestBlake2bDeterminism
+TestDefaultCompatibility
+TestEthereumVsStandardFROST
+
+# Validation Tests (Skip in CI)
+TestIsValidEthereumPubkey
+TestBitcoinKeyGeneration
+TestEthereumKeyGeneration
+TestSolanaKeyGeneration
+TestSolanaValidation
+TestBitcoinSigningPayload
+TestEthereumSigningPayload
+
+# Format Tests (Skip in CI)
+TestEthereumChallengeFormat
+TestBIP340Compatibility
+TestPreventionBasedValidation
