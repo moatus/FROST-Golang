@@ -156,6 +156,15 @@ func (bkg *BLSAnchoredKeyGen) GenerateKeyShares() (map[ParticipantIndex]*KeyShar
 		return nil, nil, fmt.Errorf("BLS binding proof verification failed: %w", err)
 	}
 
+	// Step 6: Attach BLS binding proofs and VSS commitments to key shares
+	for participantID, proof := range proofs {
+		if keyShare, exists := keyShares[participantID]; exists {
+			keyShare.BLSBindingProof = proof
+			// Store the VSS commitment (constant term) for BLS binding verification
+			keyShare.VSSCommitment = commitments[participantID][0]
+		}
+	}
+
 	// Clean up
 	for _, secret := range schnorrSecrets {
 		secret.Zeroize()
@@ -435,6 +444,27 @@ type BLSBindingProof struct {
 	Challenge     Scalar
 	Response      Scalar
 	Commitment    Point
+}
+
+// Zeroize securely clears sensitive data from the BLS binding proof
+func (proof *BLSBindingProof) Zeroize() {
+	if proof == nil {
+		return
+	}
+
+	// Clear BLS public key bytes (though public, good practice)
+	ZeroizeBytes(proof.BLSPublicKey)
+
+	// Clear sensitive scalars
+	if proof.Challenge != nil {
+		proof.Challenge.Zeroize()
+	}
+	if proof.Response != nil {
+		proof.Response.Zeroize()
+	}
+
+	// Note: Commitment is a Point (public data) so no zeroization needed
+	// Note: ParticipantID is not sensitive data
 }
 
 // generateBLSBindingProofs creates ZKPs binding FROST shares to BLS keys

@@ -2,7 +2,14 @@ package frost
 
 import (
     "crypto/sha256"
+    "encoding/binary"
     "fmt"
+    "io"
+
+    "github.com/canopy-network/canopy/lib/crypto"
+    "golang.org/x/crypto/blake2b"
+    "golang.org/x/crypto/hkdf"
+    "golang.org/x/crypto/sha3"
 )
 
 // ChallengeType defines the type of challenge computation to use
@@ -441,12 +448,320 @@ func computeChallengeHelperWithType(curve Curve, R, groupPubKey Point, message [
 }
 
 // VerifyBLSBinding verifies that a FROST key share is properly bound to a BLS key
-// WARNING: This is a placeholder implementation and should not be used in production
+// This function validates that a FROST public key was correctly derived from a BLS key
+// using the same HKDF process as BLS-anchored key generation.
+//
+// Parameters:
+//   - curve: The elliptic curve being used
+//   - blsKeyBytes: The BLS public key bytes
+//   - frostPublicKey: The FROST public key to verify
+//   - bindingProof: A *BLSBindingProof containing the zero-knowledge proof
+//
+// Returns an error if verification fails, nil if successful.
 func VerifyBLSBinding(curve Curve, blsKeyBytes []byte, frostPublicKey Point, bindingProof interface{}) error {
-    // TODO: Implement proper BLS binding verification
-    // This function currently does not perform any validation and should not be used
-    // in production systems where BLS binding security is required
-    return fmt.Errorf("VerifyBLSBinding is not implemented - do not use in production")
+    // Type check the binding proof
+    proof, ok := bindingProof.(*BLSBindingProof)
+    if !ok {
+        return fmt.Errorf("bindingProof must be of type *BLSBindingProof, got %T", bindingProof)
+    }
+
+    // Validate inputs
+    if len(blsKeyBytes) == 0 {
+        return fmt.Errorf("BLS key bytes cannot be empty")
+    }
+    if frostPublicKey == nil {
+        return fmt.Errorf("FROST public key cannot be nil")
+    }
+    if proof == nil {
+        return fmt.Errorf("binding proof cannot be nil")
+    }
+
+    // Verify the BLS public key matches the proof
+    if len(proof.BLSPublicKey) != len(blsKeyBytes) {
+        return fmt.Errorf("BLS key length mismatch: proof has %d bytes, provided %d bytes",
+            len(proof.BLSPublicKey), len(blsKeyBytes))
+    }
+
+    // Compare BLS public keys byte by byte
+    for i, b := range blsKeyBytes {
+        if proof.BLSPublicKey[i] != b {
+            return fmt.Errorf("BLS public key mismatch at byte %d", i)
+        }
+    }
+
+    // Verify the Schnorr proof: g^s = R + c * commitment
+    // where commitment should be the FROST public key if properly derived
+    leftSide := curve.BasePoint().Mul(proof.Response)
+    rightSide := proof.Commitment.Add(frostPublicKey.Mul(proof.Challenge))
+
+    if !leftSide.Equal(rightSide) {
+        return fmt.Errorf("BLS binding proof verification failed: Schnorr proof invalid")
+    }
+
+    // Verify the challenge was computed correctly
+    // We need to recompute the challenge using the same algorithm
+    expectedChallenge, err := computeBLSBindingChallenge(
+        curve,
+        proof.ParticipantID,
+        proof.BLSPublicKey,
+        frostPublicKey,
+        proof.Commitment,
+        SHA256_HKDF, // Default to compatible algorithm
+    )
+    if err != nil {
+        return fmt.Errorf("failed to compute expected challenge: %w", err)
+    }
+
+    if !proof.Challenge.Equal(expectedChallenge) {
+        return fmt.Errorf("BLS binding proof verification failed: challenge mismatch")
+    }
+
+    return nil
+}
+
+// computeBLSBindingChallenge computes the Fiat-Shamir challenge for BLS binding proof
+// This is a standalone version of the challenge computation used in BLSAnchoredKeyGen
+func computeBLSBindingChallenge(
+    curve Curve,
+    participantID ParticipantIndex,
+    blsPublicKey []byte,
+    commitment Point,
+    proofCommitment Point,
+    hashAlgorithm HashAlgorithm,
+) (Scalar, error) {
+    switch hashAlgorithm {
+    case SHA256_HKDF:
+        return computeBLSBindingChallengeHKDF(curve, participantID, blsPublicKey, commitment, proofCommitment)
+    case BLAKE2B:
+        return computeBLSBindingChallengeBlake2b(curve, participantID, blsPublicKey, commitment, proofCommitment)
+    case SHAKE256:
+        return computeBLSBindingChallengeShake256(curve, participantID, blsPublicKey, commitment, proofCommitment)
+    default:
+        return nil, fmt.Errorf("unsupported hash algorithm: %d", hashAlgorithm)
+    }
+}
+
+// computeBLSBindingChallengeHKDF computes challenge using SHA256+HKDF (compatible)
+func computeBLSBindingChallengeHKDF(
+    curve Curve,
+    participantID ParticipantIndex,
+    blsPublicKey []byte,
+    commitment Point,
+    proofCommitment Point,
+) (Scalar, error) {
+    // Create HKDF salt from domain separator
+    salt := []byte("CANOPY_BLS_BINDING_CHALLENGE_v1")
+
+    // Create HKDF info from participant ID
+    participantBytes := make([]byte, 4)
+    binary.BigEndian.PutUint32(participantBytes, uint32(participantID))
+    info := append([]byte("challenge:"), participantBytes...)
+
+    // Create HKDF input key material from all challenge components
+    ikm := append([]byte{}, blsPublicKey...)
+
+    if commitment != nil {
+        ikm = append(ikm, commitment.Bytes()...)
+    }
+
+    if proofCommitment != nil {
+        ikm = append(ikm, proofCommitment.Bytes()...)
+    }
+
+    // Generate challenge bytes using HKDF
+    hkdfReader := hkdf.New(sha256.New, ikm, salt, info)
+    challengeBytes := make([]byte, 64) // 64 bytes for uniform scalar generation
+    if _, err := io.ReadFull(hkdfReader, challengeBytes); err != nil {
+        return nil, fmt.Errorf("HKDF challenge generation failed: %w", err)
+    }
+
+    // Convert to scalar
+    challenge, err := curve.ScalarFromUniformBytes(challengeBytes)
+
+    // Clear challenge bytes from memory
+    for i := range challengeBytes {
+        challengeBytes[i] = 0
+    }
+
+    if err != nil {
+        return nil, fmt.Errorf("challenge scalar conversion failed: %w", err)
+    }
+
+    if challenge == nil {
+        return nil, fmt.Errorf("challenge scalar conversion returned nil")
+    }
+
+    return challenge, nil
+}
+
+// computeBLSBindingChallengeBlake2b computes challenge using Blake2b (better performance)
+func computeBLSBindingChallengeBlake2b(
+    curve Curve,
+    participantID ParticipantIndex,
+    blsPublicKey []byte,
+    commitment Point,
+    proofCommitment Point,
+) (Scalar, error) {
+    // Create Blake2b hasher with 64-byte output for uniform scalar generation
+    hasher, err := blake2b.New(64, nil)
+    if err != nil {
+        return nil, fmt.Errorf("failed to create Blake2b hasher: %w", err)
+    }
+
+    // Domain separator for challenge computation
+    hasher.Write([]byte("CANOPY_BLS_BINDING_CHALLENGE_BLAKE2B_v1"))
+
+    // Participant ID
+    participantBytes := make([]byte, 4)
+    binary.BigEndian.PutUint32(participantBytes, uint32(participantID))
+    hasher.Write(participantBytes)
+
+    // BLS public key
+    hasher.Write(blsPublicKey)
+
+    // Commitment point
+    if commitment != nil {
+        hasher.Write(commitment.Bytes())
+    }
+
+    // Proof commitment point
+    if proofCommitment != nil {
+        hasher.Write(proofCommitment.Bytes())
+    }
+
+    challengeBytes := hasher.Sum(nil)
+
+    challenge, err := curve.ScalarFromUniformBytes(challengeBytes)
+
+    // Clear challenge bytes from memory
+    for i := range challengeBytes {
+        challengeBytes[i] = 0
+    }
+
+    if err != nil {
+        return nil, fmt.Errorf("challenge scalar conversion failed: %w", err)
+    }
+
+    if challenge == nil {
+        return nil, fmt.Errorf("challenge scalar conversion returned nil")
+    }
+
+    return challenge, nil
+}
+
+// computeBLSBindingChallengeShake256 computes challenge using SHAKE256 (best for key derivation)
+func computeBLSBindingChallengeShake256(
+    curve Curve,
+    participantID ParticipantIndex,
+    blsPublicKey []byte,
+    commitment Point,
+    proofCommitment Point,
+) (Scalar, error) {
+    // Create SHAKE256 hasher (Extendable Output Function)
+    shake := sha3.NewShake256()
+
+    // Domain separator for challenge computation
+    shake.Write([]byte("CANOPY_BLS_BINDING_CHALLENGE_SHAKE256_v1"))
+
+    // Participant ID
+    participantBytes := make([]byte, 4)
+    binary.BigEndian.PutUint32(participantBytes, uint32(participantID))
+    shake.Write(participantBytes)
+
+    // BLS public key
+    shake.Write(blsPublicKey)
+
+    // Commitment point
+    if commitment != nil {
+        shake.Write(commitment.Bytes())
+    }
+
+    // Proof commitment point
+    if proofCommitment != nil {
+        shake.Write(proofCommitment.Bytes())
+    }
+
+    // Generate challenge bytes
+    challengeBytes := make([]byte, 64) // 64 bytes for uniform scalar generation
+    shake.Read(challengeBytes)
+
+    challenge, err := curve.ScalarFromUniformBytes(challengeBytes)
+
+    // Clear challenge bytes from memory
+    for i := range challengeBytes {
+        challengeBytes[i] = 0
+    }
+
+    if err != nil {
+        return nil, fmt.Errorf("challenge scalar conversion failed: %w", err)
+    }
+
+    if challenge == nil {
+        return nil, fmt.Errorf("challenge scalar conversion returned nil")
+    }
+
+    return challenge, nil
+}
+
+// VerifyBLSBindingWithAlgorithm verifies BLS binding with a specific hash algorithm
+// This allows users to specify which hash algorithm was used during key generation
+func VerifyBLSBindingWithAlgorithm(
+    curve Curve,
+    blsKeyBytes []byte,
+    frostPublicKey Point,
+    bindingProof *BLSBindingProof,
+    hashAlgorithm HashAlgorithm,
+) error {
+    // Validate inputs
+    if len(blsKeyBytes) == 0 {
+        return fmt.Errorf("BLS key bytes cannot be empty")
+    }
+    if frostPublicKey == nil {
+        return fmt.Errorf("FROST public key cannot be nil")
+    }
+    if bindingProof == nil {
+        return fmt.Errorf("binding proof cannot be nil")
+    }
+
+    // Verify the BLS public key matches the proof
+    if len(bindingProof.BLSPublicKey) != len(blsKeyBytes) {
+        return fmt.Errorf("BLS key length mismatch: proof has %d bytes, provided %d bytes",
+            len(bindingProof.BLSPublicKey), len(blsKeyBytes))
+    }
+
+    // Compare BLS public keys byte by byte
+    for i, b := range blsKeyBytes {
+        if bindingProof.BLSPublicKey[i] != b {
+            return fmt.Errorf("BLS public key mismatch at byte %d", i)
+        }
+    }
+
+    // Verify the Schnorr proof: g^s = R + c * commitment
+    leftSide := curve.BasePoint().Mul(bindingProof.Response)
+    rightSide := bindingProof.Commitment.Add(frostPublicKey.Mul(bindingProof.Challenge))
+
+    if !leftSide.Equal(rightSide) {
+        return fmt.Errorf("BLS binding proof verification failed: Schnorr proof invalid")
+    }
+
+    // Verify the challenge was computed correctly with the specified algorithm
+    expectedChallenge, err := computeBLSBindingChallenge(
+        curve,
+        bindingProof.ParticipantID,
+        bindingProof.BLSPublicKey,
+        frostPublicKey,
+        bindingProof.Commitment,
+        hashAlgorithm,
+    )
+    if err != nil {
+        return fmt.Errorf("failed to compute expected challenge: %w", err)
+    }
+
+    if !bindingProof.Challenge.Equal(expectedChallenge) {
+        return fmt.Errorf("BLS binding proof verification failed: challenge mismatch")
+    }
+
+    return nil
 }
 
 // GenerateCommitment is a compatibility method that calls Round1
@@ -455,12 +770,70 @@ func (ss *SigningSession) GenerateCommitment(participantID ParticipantIndex, key
 }
 
 // GenerateBLSValidatedCommitment generates a commitment with BLS validation
-// WARNING: This is a placeholder implementation and should not be used in production
+// This function generates a FROST signing commitment while verifying that the key share
+// is properly bound to the provided BLS key through a zero-knowledge proof.
+//
+// Parameters:
+//   - participantID: The ID of the participant generating the commitment
+//   - keyShare: The FROST key share (must include BLS binding proof)
+//   - blsKey: The BLS private key (must be *crypto.BLS12381PrivateKey)
+//
+// Returns a SigningCommitment if successful, or an error if BLS validation fails.
 func (ss *SigningSession) GenerateBLSValidatedCommitment(participantID ParticipantIndex, keyShare *KeyShare, blsKey interface{}) (*SigningCommitment, error) {
-    // TODO: Implement proper BLS validation logic
-    // This function currently does not perform BLS validation and should not be used
-    // in production systems where BLS validation is required
-    return nil, fmt.Errorf("GenerateBLSValidatedCommitment is not implemented - do not use in production")
+    // Validate inputs
+    if keyShare == nil {
+        return nil, fmt.Errorf("key share cannot be nil")
+    }
+    if blsKey == nil {
+        return nil, fmt.Errorf("BLS key cannot be nil")
+    }
+
+    // Type check the BLS key
+    blsPrivKey, ok := blsKey.(*crypto.BLS12381PrivateKey)
+    if !ok {
+        return nil, fmt.Errorf("blsKey must be of type *crypto.BLS12381PrivateKey, got %T", blsKey)
+    }
+
+    // Get BLS public key bytes for validation
+    blsPubKey := blsPrivKey.PublicKey()
+    if blsPubKey == nil {
+        return nil, fmt.Errorf("BLS public key is nil")
+    }
+    blsPubKeyBytes := blsPubKey.Bytes()
+
+    // Verify BLS binding if key share has binding proof
+    if keyShare.BLSBindingProof != nil {
+        // Use VSS commitment if available, otherwise fall back to individual public key
+        commitmentToVerify := keyShare.VSSCommitment
+        if commitmentToVerify == nil {
+            commitmentToVerify = keyShare.PublicKey
+        }
+
+        err := VerifyBLSBindingWithAlgorithm(
+            ss.curve,
+            blsPubKeyBytes,
+            commitmentToVerify,
+            keyShare.BLSBindingProof,
+            SHA256_HKDF, // Default algorithm - could be made configurable
+        )
+        if err != nil {
+            return nil, fmt.Errorf("BLS binding validation failed: %w", err)
+        }
+    } else {
+        // If no binding proof is available, we can't validate BLS binding
+        // This might be acceptable in some scenarios, but we should warn
+        return nil, fmt.Errorf("key share does not contain BLS binding proof - cannot validate BLS binding")
+    }
+
+    // BLS validation passed, now generate the regular FROST commitment
+    // The session already has the keyShare, but we need to ensure it matches
+    if ss.keyShare.ParticipantID != participantID {
+        return nil, fmt.Errorf("participant ID mismatch: session has %d, provided %d",
+            ss.keyShare.ParticipantID, participantID)
+    }
+
+    // Generate the commitment using the standard FROST protocol
+    return ss.Round1()
 }
 
 // GenerateResponse is a compatibility method that calls Round2
@@ -473,12 +846,78 @@ func (ss *SigningSession) GenerateResponse(participantID ParticipantIndex, keySh
 }
 
 // GenerateBLSValidatedResponse generates a response with BLS validation
-// WARNING: This is a placeholder implementation and should not be used in production
+// This function generates a FROST signing response while verifying that the key share
+// is properly bound to the provided BLS key through a zero-knowledge proof.
+//
+// Parameters:
+//   - participantID: The ID of the participant generating the response
+//   - keyShare: The FROST key share (must include BLS binding proof)
+//   - blsKey: The BLS private key (must be *crypto.BLS12381PrivateKey)
+//   - commitments: Map of participant commitments from Round 1
+//
+// Returns a SigningResponse if successful, or an error if BLS validation fails.
 func (ss *SigningSession) GenerateBLSValidatedResponse(participantID ParticipantIndex, keyShare *KeyShare, blsKey interface{}, commitments map[ParticipantIndex]*SigningCommitment) (*SigningResponse, error) {
-    // TODO: Implement proper BLS validation logic
-    // This function currently does not perform BLS validation and should not be used
-    // in production systems where BLS validation is required
-    return nil, fmt.Errorf("GenerateBLSValidatedResponse is not implemented - do not use in production")
+    // Validate inputs
+    if keyShare == nil {
+        return nil, fmt.Errorf("key share cannot be nil")
+    }
+    if blsKey == nil {
+        return nil, fmt.Errorf("BLS key cannot be nil")
+    }
+    if commitments == nil {
+        return nil, fmt.Errorf("commitments cannot be nil")
+    }
+
+    // Type check the BLS key
+    blsPrivKey, ok := blsKey.(*crypto.BLS12381PrivateKey)
+    if !ok {
+        return nil, fmt.Errorf("blsKey must be of type *crypto.BLS12381PrivateKey, got %T", blsKey)
+    }
+
+    // Get BLS public key bytes for validation
+    blsPubKey := blsPrivKey.PublicKey()
+    if blsPubKey == nil {
+        return nil, fmt.Errorf("BLS public key is nil")
+    }
+    blsPubKeyBytes := blsPubKey.Bytes()
+
+    // Verify BLS binding if key share has binding proof
+    if keyShare.BLSBindingProof != nil {
+        // Use VSS commitment if available, otherwise fall back to individual public key
+        commitmentToVerify := keyShare.VSSCommitment
+        if commitmentToVerify == nil {
+            commitmentToVerify = keyShare.PublicKey
+        }
+
+        err := VerifyBLSBindingWithAlgorithm(
+            ss.curve,
+            blsPubKeyBytes,
+            commitmentToVerify,
+            keyShare.BLSBindingProof,
+            SHA256_HKDF, // Default algorithm - could be made configurable
+        )
+        if err != nil {
+            return nil, fmt.Errorf("BLS binding validation failed: %w", err)
+        }
+    } else {
+        // If no binding proof is available, we can't validate BLS binding
+        return nil, fmt.Errorf("key share does not contain BLS binding proof - cannot validate BLS binding")
+    }
+
+    // BLS validation passed, now generate the regular FROST response
+    // The session already has the keyShare, but we need to ensure it matches
+    if ss.keyShare.ParticipantID != participantID {
+        return nil, fmt.Errorf("participant ID mismatch: session has %d, provided %d",
+            ss.keyShare.ParticipantID, participantID)
+    }
+
+    // Add commitments to session
+    for pid, commitment := range commitments {
+        ss.commitments[pid] = commitment
+    }
+
+    // Generate the response using the standard FROST protocol
+    return ss.Round2()
 }
 
 // AggregateSignature aggregates signature shares into a final signature

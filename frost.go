@@ -7,17 +7,23 @@ type ParticipantIndex uint32
 
 // KeyShare represents a participant's share in FROST
 type KeyShare struct {
-    ParticipantID ParticipantIndex
-    SecretShare   Scalar
-    PublicKey     Point
-    GroupPublicKey Point
+    ParticipantID    ParticipantIndex
+    SecretShare      Scalar
+    PublicKey        Point
+    GroupPublicKey   Point
+    BLSBindingProof  *BLSBindingProof // Optional: proof that this share is bound to a BLS key
+    VSSCommitment    Point            // Optional: VSS commitment (constant term) for BLS binding verification
 }
 
-// Zeroize securely clears the secret share
+// Zeroize securely clears the secret share and sensitive data
 func (ks *KeyShare) Zeroize() {
     if ks.SecretShare != nil {
         ks.SecretShare.Zeroize()
     }
+    if ks.BLSBindingProof != nil {
+        ks.BLSBindingProof.Zeroize()
+    }
+    // Note: VSSCommitment is a Point (public data) so no zeroization needed
 }
 
 // Signature represents a FROST threshold signature

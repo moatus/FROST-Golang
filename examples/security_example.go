@@ -1,3 +1,5 @@
+//go:build rpw
+
 package examples
 
 import (

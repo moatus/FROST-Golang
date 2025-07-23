@@ -153,9 +153,14 @@ func (s *Secp256k1Scalar) Invert() (Scalar, error) {
     if s.IsZero() {
         return nil, ErrScalarZero
     }
-    
+
     result := new(btcec.ModNScalar)
-    result.InverseValNonConst(s.inner)
+    // WARNING: Using non-constant-time scalar inversion which may leak timing information.
+    // btcec/v2 does not provide constant-time scalar inversion. For high-security environments:
+    // 1. Use Ed25519 curve which provides constant-time operations
+    // 2. Deploy behind network protections (load balancers, CDNs) to mitigate timing attacks
+    // 3. Consider implementing additional blinding techniques
+    result.Set(s.inner).InverseNonConst()
     return &Secp256k1Scalar{inner: result}, nil
 }
 
@@ -206,10 +211,15 @@ func (p *Secp256k1Point) Add(other Point) Point {
     // Convert to Jacobian coordinates for addition
     var result btcec.JacobianPoint
     p.inner.AsJacobian(&result)
-    
+
     var otherJac btcec.JacobianPoint
     other.(*Secp256k1Point).inner.AsJacobian(&otherJac)
-    
+
+    // WARNING: Using non-constant-time point addition which may leak timing information.
+    // btcec/v2 does not provide constant-time point addition. For high-security environments:
+    // 1. Use Ed25519 curve which provides constant-time operations
+    // 2. Deploy behind network protections to mitigate timing attacks
+    // 3. Consider implementing additional blinding techniques
     btcec.AddNonConst(&result, &otherJac, &result)
     
     // Convert back to affine
@@ -236,6 +246,11 @@ func (p *Secp256k1Point) Mul(scalar Scalar) Point {
     p.inner.AsJacobian(&pointJac)
 
     var result btcec.JacobianPoint
+    // WARNING: Using non-constant-time scalar multiplication which may leak timing information.
+    // btcec/v2 does not provide constant-time scalar multiplication. For high-security environments:
+    // 1. Use Ed25519 curve which provides constant-time operations
+    // 2. Deploy behind network protections to mitigate timing attacks
+    // 3. Consider implementing additional blinding techniques
     btcec.ScalarMultNonConst(&scalarInt, &pointJac, &result)
 
     result.ToAffine()

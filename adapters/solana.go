@@ -4,7 +4,7 @@ import (
     "fmt"
 
     "github.com/canopy-network/canopy/lib/frost"
-    "github.com/canopy-network/canopy/lib/rpw"
+    // "github.com/canopy-network/canopy/lib/rpw" // Missing dependency
 )
 
 // ChainType represents different blockchain types
@@ -16,18 +16,19 @@ const ChainTypeSolana ChainType = "solana"
 // SolanaAdapter handles Solana transactions using FROST
 type SolanaAdapter struct {
     curve     frost.Curve
-    committee *rpw.CanopyRPWCommittee
+    // committee *rpw.CanopyRPWCommittee // Missing dependency
 }
 
 // NewSolanaAdapter creates a new Solana adapter
-func NewSolanaAdapter(committee *rpw.CanopyRPWCommittee) *SolanaAdapter {
-    if committee == nil {
-        return nil
-    }
+func NewSolanaAdapter(/* committee *rpw.CanopyRPWCommittee */) *SolanaAdapter {
+    // Missing dependency - commented out
+    // if committee == nil {
+    //     return nil
+    // }
 
     return &SolanaAdapter{
         curve:     frost.NewEd25519Curve(),
-        committee: committee,
+        // committee: committee,
     }
 }
 
@@ -37,9 +38,9 @@ func (sa *SolanaAdapter) GetCurve() frost.Curve {
 }
 
 // GetCommittee returns the RPW committee
-func (sa *SolanaAdapter) GetCommittee() *rpw.CanopyRPWCommittee {
-    return sa.committee
-}
+// func (sa *SolanaAdapter) GetCommittee() *rpw.CanopyRPWCommittee {
+//     return sa.committee
+// }
 
 // SignMessage signs a message using FROST with Solana Ed25519 challenge
 func (sa *SolanaAdapter) SignMessage(
@@ -56,13 +57,14 @@ func (sa *SolanaAdapter) SignMessage(
     }
     
     // Sign using FROST with Solana challenge
-    signature, err := sa.committee.SignMessage(message, signerIDs)
-    if err != nil {
-        return nil, fmt.Errorf("FROST signing failed: %w", err)
-    }
+    // signature, err := sa.committee.SignMessage(message, signerIDs) // Missing dependency
+    // if err != nil {
+    //     return nil, fmt.Errorf("FROST signing failed: %w", err)
+    // }
+    return nil, fmt.Errorf("Solana adapter not implemented - missing rpw dependency")
     
     // Convert to Solana signature format
-    return sa.frostToSolanaSignature(signature)
+    // return sa.frostToSolanaSignature(signature) // Missing dependency
 }
 
 // frostToSolanaSignature converts a FROST signature to Solana format
@@ -114,7 +116,8 @@ func (sa *SolanaAdapter) SignTransaction(
 
 // GetPublicKey returns the group public key for this adapter
 func (sa *SolanaAdapter) GetPublicKey() (frost.Point, error) {
-    return sa.committee.GetGroupPublicKey()
+    // return sa.committee.GetGroupPublicKey() // Missing dependency
+    return nil, fmt.Errorf("Solana adapter not implemented - missing rpw dependency")
 }
 
 // ValidateTransaction validates a Solana transaction format
