@@ -22,6 +22,10 @@ func TestSecurityFrameworkIntegration(t *testing.T) {
 	auditHandler := NewMockAuditHandler()
 
 	t.Run("CompleteRegenerationWorkflow", func(t *testing.T) {
+		// This test demonstrates the complete validator set change workflow
+		// and verifies that wallet addresses remain stable using the new
+		// foundation-anchored approach, while the original BLS-anchored
+		// approach changes addresses (as expected).
 		// Create initial BLS keys
 		initialBLSKeys := map[ParticipantIndex]*crypto.BLS12381PrivateKey{
 			1: createMockBLSKeyForIntegration(t, 1),
@@ -74,6 +78,16 @@ func TestSecurityFrameworkIntegration(t *testing.T) {
 		if auditHandler.GetEventCount() == 0 {
 			t.Error("Should have generated audit events")
 		}
+
+		// Step 3.1: Create stable wallet to test address stability
+		stableWallet, err := CreateStableWallet(curve, foundationKey, initialThreshold, initialParticipants, initialBLSKeys)
+		if err != nil {
+			t.Fatalf("Failed to create stable wallet: %v", err)
+		}
+
+		// Record initial stable address
+		initialStableAddress := stableWallet.StableAddress
+		t.Logf("Initial stable address: %x", initialStableAddress.CompressedBytes())
 
 		// Step 4: Simulate validator set change
 		newBLSKeys := map[ParticipantIndex]*crypto.BLS12381PrivateKey{
@@ -150,6 +164,31 @@ func TestSecurityFrameworkIntegration(t *testing.T) {
 			t.Fatalf("Regeneration should be successful: %v", changeResult.Errors)
 		}
 
+		// Step 8.1: Verify address stability during validator set change
+		err = stableWallet.UpdateValidatorSet(curve, foundationKey, newThreshold, newParticipants, newBLSKeys)
+		if err != nil {
+			t.Fatalf("Failed to update stable wallet validator set: %v", err)
+		}
+
+		// Record new stable address after validator set change
+		newStableAddress := stableWallet.StableAddress
+		t.Logf("Stable address after validator set change: %x", newStableAddress.CompressedBytes())
+
+		// CRITICAL TEST: Address must remain the same!
+		if !initialStableAddress.Equal(newStableAddress) {
+			t.Fatalf("❌ CRITICAL: Stable address changed during validator set change!\n"+
+				"  Initial address: %x\n"+
+				"  New address:     %x\n"+
+				"This breaks the core requirement of address stability.",
+				initialStableAddress.CompressedBytes(),
+				newStableAddress.CompressedBytes())
+		}
+
+		t.Logf("✅ Address stability verified: wallet address remains constant across validator set changes")
+		t.Logf("   Validator set changed from %v to %v", initialParticipants, newParticipants)
+		t.Logf("   Threshold changed from %d to %d", initialThreshold, newThreshold)
+		t.Logf("   Address remained: %x", initialStableAddress.CompressedBytes())
+
 		// Step 9: Verify results
 		if len(changeResult.SharesGenerated) != len(newParticipants) {
 			t.Errorf("Should generate %d shares, got %d", len(newParticipants), len(changeResult.SharesGenerated))
@@ -158,6 +197,30 @@ func TestSecurityFrameworkIntegration(t *testing.T) {
 		if changeResult.NewConfiguration.Threshold != newThreshold {
 			t.Errorf("New threshold should be %d, got %d", newThreshold, changeResult.NewConfiguration.Threshold)
 		}
+
+		// Step 9.1: Test threshold signing with stable address after validator set change
+		testMessage := []byte("Security integration test: validator set change with stable address")
+		signerIDs := []ParticipantIndex{1, 2, 4} // Use threshold signers from new validator set
+
+		signature, err := stableWallet.SignMessage(curve, testMessage, signerIDs)
+		if err != nil {
+			t.Fatalf("Failed to sign message with new validator set: %v", err)
+		}
+
+		// Verify signature against the stable address
+		valid, err := stableWallet.VerifySignature(curve, signature, testMessage)
+		if err != nil {
+			t.Fatalf("Failed to verify signature: %v", err)
+		}
+
+		if !valid {
+			t.Fatal("Signature verification failed with stable address")
+		}
+
+		t.Logf("✅ Threshold signing verified: new validator set can sign for stable address")
+		t.Logf("   Signers: %v", signerIDs)
+		t.Logf("   Message: %s", string(testMessage))
+		t.Logf("   Signature verified against stable address: %x", initialStableAddress.CompressedBytes())
 
 		// Step 10: Verify audit trail
 		if len(auditHandler.shareRegenerations) < 2 {
@@ -183,6 +246,39 @@ func TestSecurityFrameworkIntegration(t *testing.T) {
 		if !hasValidatorSetChange {
 			t.Error("Should have validator set change event")
 		}
+
+		// Step 11: Compare with original BLS-anchored approach to demonstrate the difference
+		t.Logf("=== Comparison: Original vs Stable Address Approach ===")
+
+		// Original BLS-anchored approach (addresses change)
+		originalBKG1 := NewBLSAnchoredKeyGen(curve, initialThreshold, initialParticipants, foundationKey, initialBLSKeys)
+		_, originalAddress1, err := originalBKG1.GenerateKeyShares()
+		if err != nil {
+			t.Fatalf("Failed to generate original shares 1: %v", err)
+		}
+
+		originalBKG2 := NewBLSAnchoredKeyGen(curve, newThreshold, newParticipants, foundationKey, newBLSKeys)
+		_, originalAddress2, err := originalBKG2.GenerateKeyShares()
+		if err != nil {
+			t.Fatalf("Failed to generate original shares 2: %v", err)
+		}
+
+		// Original approach should produce different addresses
+		if originalAddress1.Equal(originalAddress2) {
+			t.Error("Original BLS-anchored approach should produce different addresses for different validator sets")
+		}
+
+		t.Logf("Original BLS-anchored approach:")
+		t.Logf("  Initial address:  %x", originalAddress1.CompressedBytes())
+		t.Logf("  Changed address:  %x", originalAddress2.CompressedBytes())
+		t.Logf("  Result: ❌ Address changed (as expected for original approach)")
+
+		t.Logf("New stable address approach:")
+		t.Logf("  Initial address:  %x", initialStableAddress.CompressedBytes())
+		t.Logf("  Stable address:   %x", newStableAddress.CompressedBytes())
+		t.Logf("  Result: ✅ Address stable (new capability)")
+
+		t.Logf("✅ Security integration test demonstrates both address stability and validator set flexibility")
 	})
 
 	t.Run("ErrorHandlingIntegration", func(t *testing.T) {
